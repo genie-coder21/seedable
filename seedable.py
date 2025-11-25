@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger('seedable')
 
 # Configuration from environment variables
-NZBHYDRA_URL = os.getenv('NZBHYDRA_URL', 'http://192.168.1.203:5076')
+NZBHYDRA_URL = os.getenv('NZBHYDRA_URL', 'http://YOUR_SERVER_IP:5076')
 NZBHYDRA_API_KEY = os.getenv('NZBHYDRA_API_KEY', '')  # Optional: for NZBHydra2 authentication
 API_KEY = os.getenv('API_KEY', 'seedable-default-key')
 MIN_DUPLICATES = int(os.getenv('MIN_DUPLICATES', '2'))
@@ -33,9 +33,9 @@ PORT = int(os.getenv('PORT', '5000'))
 HOST = os.getenv('HOST', '0.0.0.0')
 
 # Radarr/Sonarr configuration (for IMDb/TVDb ID → title lookup)
-RADARR_URL = os.getenv('RADARR_URL', 'http://192.168.1.203:7878')
+RADARR_URL = os.getenv('RADARR_URL', 'http://YOUR_SERVER_IP:7878')
 RADARR_API_KEY = os.getenv('RADARR_API_KEY', '')
-SONARR_URL = os.getenv('SONARR_URL', 'http://192.168.1.203:8989')
+SONARR_URL = os.getenv('SONARR_URL', 'http://YOUR_SERVER_IP:8989')
 SONARR_API_KEY = os.getenv('SONARR_API_KEY', '')
 
 # Private tracker prioritization (optional)
