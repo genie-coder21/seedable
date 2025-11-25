@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  seedable:
+    build: .
+    container_name: seedable
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # NZBHydra2 connection
+      - NZBHYDRA_URL=http://YOUR_SERVER_IP:5076
+      # - NZBHYDRA_API_KEY=your-nzbhydra-api-key-here
+
+      # API key for Sonarr/Radarr
+      - API_KEY=your-seedable-api-key-here
+
+      # Radarr/Sonarr API configuration (optional but highly recommended)
+      # Used to convert IMDb/TVDb IDs to movie/show titles for efficient searching
+      # Without these, searches may return 800+ irrelevant results
+      # Find API keys in: Settings → General → Security → API Key
+      - RADARR_URL=http://YOUR_SERVER_IP:7878
+      - RADARR_API_KEY=your-radarr-api-key-here
+      - SONARR_URL=http://YOUR_SERVER_IP:8989
+      - SONARR_API_KEY=your-sonarr-api-key-here
+
+      # Filtering settings
+      - MIN_DUPLICATES=2
+      - SIZE_TOLERANCE_PERCENT=2.0
+
+      # Private tracker prioritization (optional)
+      # Comma-separated list of private tracker names as they appear in NZBHydra2
+      # If set, public trackers will only show results that can cross-seed to private trackers
+      # Example: TorrentLeech,IPTorrents,PassThePopcorn,BroadcasTheNet
+      - PRIVATE_TRACKERS=
+
+      # Server settings
+      - PORT=5000
+      - HOST=0.0.0.0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
