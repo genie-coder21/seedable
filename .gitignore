@@ -44,3 +44,4 @@ Thumbs.db
 
 # Docker
 *.tar
+sync-from-production.sh
