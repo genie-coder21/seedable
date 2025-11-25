@@ -55,12 +55,6 @@ When you search for content in Sonarr/Radarr:
 - Copy `.env.example` to `.env` and customize your settings
 - docker-compose.yml automatically loads values from `.env`
 
-**Git Integration:**
-- Repository is Git-enabled for easy updates and version control
-- Your personal `.env` file is automatically gitignored (never committed)
-- Safe to commit code changes without exposing credentials
-- Pull updates directly from GitHub: `git pull origin main`
-
 ## Quick Start
 
 ### 1. Clone or Download
@@ -293,7 +287,7 @@ Seedable is designed to work with **BOTH private and public trackers** simultane
 PRIVATE_TRACKERS=TorrentLeech,IPTorrents,PassThePopcorn,BroadcasTheNet
 
 # Example with different private trackers:
-PRIVATE_TRACKERS=DarkPeers,DigitalCore,HomieHelpDesk,Rastastugan,SeedPool
+PRIVATE_TRACKERS=PrivateHD,HDTorrents,AlphaRatio,MyTracker,TorrentVault
 ```
 
 **⚠️ Use exact names from NZBHydra2 - Case sensitive! Comma-separated, no spaces!**
