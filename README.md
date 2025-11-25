@@ -4,14 +4,32 @@
 
 Seedable is a middleware service that filters NZBHydra2 search results to only show torrents available on 2 or more trackers, ensuring every download has cross-seeding potential.
 
+**Works with both Private AND Public trackers!** Seedable helps you maximize your seeding efficiency whether you're on private trackers, public trackers, or a mix of both.
+
+## Architecture
+
+```
+┌──────────────┐         ┌──────────────┐         ┌──────────────────┐
+│              │         │              │         │                  │
+│  Sonarr/     │ ------> │   Seedable   │ ------> │   NZBHydra2      │
+│  Radarr      │ <------ │   (Proxy)    │ <------ │   (Indexers)     │
+│              │         │              │         │                  │
+└──────────────┘         └──────────────┘         └──────────────────┘
+   Search Request         Filters Results           Queries All Trackers
+   for "The Matrix"       to Cross-Seedable        (Private + Public)
+```
+
+Seedable sits between Sonarr/Radarr and NZBHydra2, automatically filtering search results to show only cross-seedable torrents.
+
 ## What It Does
 
 When you search for content in Sonarr/Radarr:
 1. **Sonarr/Radarr** sends a search request to Seedable
-2. **Seedable** queries NZBHydra2 for results from all your indexers
+2. **Seedable** queries NZBHydra2 for results from all your indexers (private + public)
 3. **Groups** results by normalized title and size
 4. **Filters** to only keep torrents that exist on **2+ trackers**
-5. **Returns** only cross-seedable results to Sonarr/Radarr
+5. **Labels** results with `[PRI:X PUB:Y]` showing tracker distribution
+6. **Returns** only cross-seedable results to Sonarr/Radarr
 
 **Result:** Your search results are automatically curated to show only torrents you can cross-seed!
 
@@ -29,15 +47,37 @@ When you search for content in Sonarr/Radarr:
 - Sonarr and/or Radarr
 - cross-seed (optional, but recommended)
 
+## Recent Changes
+
+**Configuration Simplified (.env file):**
+- All configuration now uses a single `.env` file for easy management
+- No more hardcoded credentials in docker-compose.yml
+- Copy `.env.example` to `.env` and customize your settings
+- docker-compose.yml automatically loads values from `.env`
+
+**Git Integration:**
+- Repository is Git-enabled for easy updates and version control
+- Your personal `.env` file is automatically gitignored (never committed)
+- Safe to commit code changes without exposing credentials
+- Pull updates directly from GitHub: `git pull origin main`
+
 ## Quick Start
 
 ### 1. Clone or Download
 
+**Option 1: Git Clone (Recommended)**
+```bash
+cd /opt
+git clone https://github.com/genie-coder21/seedable.git
+cd seedable
+```
+
+**Option 2: Manual Download**
 ```bash
 cd /opt
 mkdir seedable
 cd seedable
-# Copy all files to this directory
+# Download and extract files to this directory
 ```
 
 ### 2. Generate API Key
@@ -76,26 +116,48 @@ Copy the generated key - you'll need it for both docker-compose.yml and Sonarr/R
 
 ### 4. Configure
 
-Edit `docker-compose.yml` and set your configuration:
+Copy the example configuration file and edit it:
 
-```yaml
-environment:
-  - NZBHYDRA_URL=http://YOUR_SERVER_IP:5076   # Your NZBHydra2 URL
-  # - NZBHYDRA_API_KEY=                       # Optional: NZBHydra2 API key (if auth enabled)
-
-  - API_KEY=your-seedable-api-key-here        # Your generated Seedable API key
-
-  # HIGHLY RECOMMENDED: Add Radarr/Sonarr API keys for efficient searching
-  # Without these, searches will return 800+ results and filter slowly
-  # With these, searches return ~20 relevant results instantly
-  - RADARR_URL=http://YOUR_SERVER_IP:7878
-  - RADARR_API_KEY=your-radarr-api-key-here
-  - SONARR_URL=http://YOUR_SERVER_IP:8989
-  - SONARR_API_KEY=your-sonarr-api-key-here
-
-  - MIN_DUPLICATES=2                         # Minimum trackers required
-  - SIZE_TOLERANCE_PERCENT=2.0               # Size matching tolerance
+```bash
+cp .env.example .env
+nano .env
 ```
+
+Edit `.env` and set your configuration:
+
+```bash
+# NZBHydra2 Configuration
+NZBHYDRA_URL=http://YOUR_SERVER_IP:5076
+NZBHYDRA_API_KEY=                            # Optional: Only if auth enabled
+
+# Seedable API Key (use the key you generated in step 2)
+API_KEY=your-seedable-api-key-here
+
+# Radarr/Sonarr API Configuration (HIGHLY RECOMMENDED)
+# Without these, searches return 800+ results and filter slowly
+# With these, searches return ~20 relevant results instantly
+RADARR_URL=http://YOUR_SERVER_IP:7878
+RADARR_API_KEY=your-radarr-api-key-here
+SONARR_URL=http://YOUR_SERVER_IP:8989
+SONARR_API_KEY=your-sonarr-api-key-here
+
+# Filtering Settings
+MIN_DUPLICATES=2
+SIZE_TOLERANCE_PERCENT=2.0
+
+# ⚠️ CRITICAL: Private Tracker Prioritization
+# ⚠️ YOU MUST SET THIS FOR SEEDABLE TO WORK PROPERLY!
+# List your private tracker names exactly as they appear in NZBHydra2
+# Without this, the filters will remove most/all results!
+# Example: TorrentLeech,IPTorrents,PassThePopcorn
+PRIVATE_TRACKERS=your,private,tracker,names,here
+
+# Server Configuration
+PORT=5000
+HOST=0.0.0.0
+```
+
+**⚠️ IMPORTANT:** The `PRIVATE_TRACKERS` setting is **CRITICAL** for proper operation! See the "Private Tracker Configuration" section below for details.
 
 ### 5. Deploy
 
@@ -113,15 +175,22 @@ Visit `http://YOUR_SERVER_IP:5000` to see the status page.
 1. Go to **Settings** → **Indexers** → **Add** → **Custom** → **Torznab**
 2. **Name:** `Seedable`
 3. **URL:** `http://YOUR_SERVER_IP:5000` ⚠️ **DO NOT include `/api` - Sonarr adds it automatically**
-4. **API Key:** (the API_KEY you set in docker-compose.yml)
-5. **Categories:** ⚠️ **IMPORTANT: You MUST select category 5000 (TV)** - this is the main category that most results use
-   - ✅ **5000 (TV)** ← **REQUIRED! Most TV torrents use this category**
-   - ✅ 5030 (TV SD) - Optional
-   - ✅ 5040 (TV HD) - Optional
-   - ✅ 5045 (TV UHD) - Optional
-   - ✅ 5020 (TV Foreign) - Optional
-   - ✅ 5070 (TV Anime) - Optional
-   - ✅ 5080 (TV Documentary) - Optional
+4. **API Key:** (the API_KEY you set in .env file)
+5. **Categories:** ⚠️ **CRITICAL: Select ALL TV categories (main category + subcategories)**
+
+   **Select ALL of these:**
+   - ✅ **5000 (TV)** ← **MAIN CATEGORY - REQUIRED!**
+   - ✅ **5020 (TV Foreign)**
+   - ✅ **5030 (TV SD)**
+   - ✅ **5040 (TV HD)**
+   - ✅ **5045 (TV UHD)**
+   - ✅ **5050 (TV Other)**
+   - ✅ **5060 (TV Sport)**
+   - ✅ **5070 (TV Anime)**
+   - ✅ **5080 (TV Documentary)**
+
+   **Why select ALL categories?** Different indexers assign torrents to different categories. Some use the main category (5000), others use subcategories (5040, 5045, etc.). To ensure you see all available torrents, select every TV category.
+
 6. **Enable RSS Sync:** Disabled (recommended for Seedable)
 7. **Enable Automatic Search:** Yes
 8. **Enable Interactive Search:** Yes
@@ -132,14 +201,21 @@ Visit `http://YOUR_SERVER_IP:5000` to see the status page.
 1. Go to **Settings** → **Indexers** → **Add** → **Custom** → **Torznab**
 2. **Name:** `Seedable`
 3. **URL:** `http://YOUR_SERVER_IP:5000` ⚠️ **DO NOT include `/api` - Radarr adds it automatically**
-4. **API Key:** (the API_KEY you set in docker-compose.yml)
-5. **Categories:** ⚠️ **IMPORTANT: You MUST select category 2000 (Movies)** - this is the main category that most results use
-   - ✅ **2000 (Movies)** ← **REQUIRED! Most movie torrents use this category**
-   - ✅ 2010 (Movies Foreign) - Optional
-   - ✅ 2040 (Movies HD) - Optional
-   - ✅ 2045 (Movies UHD) - Optional
-   - ✅ 2030 (Movies SD) - Optional
-   - ✅ 2020 (Movies Other) - Optional
+4. **API Key:** (the API_KEY you set in .env file)
+5. **Categories:** ⚠️ **CRITICAL: Select ALL Movie categories (main category + subcategories)**
+
+   **Select ALL of these:**
+   - ✅ **2000 (Movies)** ← **MAIN CATEGORY - REQUIRED!**
+   - ✅ **2010 (Movies Foreign)**
+   - ✅ **2020 (Movies Other)**
+   - ✅ **2030 (Movies SD)**
+   - ✅ **2040 (Movies HD)**
+   - ✅ **2045 (Movies UHD)**
+   - ✅ **2050 (Movies 3D)**
+   - ✅ **2060 (Movies BluRay)**
+
+   **Why select ALL categories?** Different indexers assign torrents to different categories. Some use the main category (2000), others use subcategories (2040, 2045, etc.). To ensure you see all available torrents, select every Movie category.
+
 6. **Enable RSS Sync:** Disabled (recommended for Seedable)
 7. **Enable Automatic Search:** Yes
 8. **Enable Interactive Search:** Yes
@@ -189,47 +265,79 @@ With the API keys:
 
 **The API keys are optional but highly recommended for performance.**
 
-### Private Tracker Prioritization
+### Private Tracker Configuration
 
-Seedable can be configured to prioritize private trackers and filter out public-only results. This feature is useful if you:
-- Have a mix of public and private trackers in NZBHydra2
-- Only want to download from public trackers if you can cross-seed to private trackers
-- Want to maximize upload on private trackers
+⚠️ **CRITICAL REQUIREMENT: You MUST configure your private trackers for Seedable to work properly!**
 
-**How it works:**
-1. Configure `PRIVATE_TRACKERS` with your private tracker names (as they appear in NZBHydra2)
-2. Seedable groups torrents and counts how many are from private vs public trackers
-3. **Groups with ONLY public trackers are filtered out**
-4. Groups with at least 1 private tracker are kept (including their public tracker duplicates)
-5. Each result is labeled with `[PUB:X PRI:Y]` showing tracker counts
+**Why is this required?**
 
-**Example Configuration:**
+Seedable needs to know which of your indexers are private vs public to properly filter and label results. **Without this configuration, Seedable's filters will aggressively remove most or all search results**, leaving you with few or no torrents to download.
 
-First, check how your trackers appear in NZBHydra2 (Settings → Indexers → Name column). Then add them to docker-compose.yml:
+**How Seedable works with Private + Public trackers:**
 
-```yaml
-- PRIVATE_TRACKERS=TorrentLeech,IPTorrents,PassThePopcorn,BroadcasTheNet,Nebulance
+Seedable is designed to work with **BOTH private and public trackers** simultaneously. The `PRIVATE_TRACKERS` setting tells Seedable:
+1. Which trackers are private (so it can label them correctly)
+2. How to prioritize results for maximum cross-seeding potential
+
+**Configuration Steps:**
+
+1. **Find your tracker names in NZBHydra2:**
+   - Go to **Config** → **Indexers**
+   - Look at the **Name** column
+   - Copy the exact names of your **PRIVATE trackers only**
+
+2. **Add them to your .env file:**
+
+```bash
+# Example with private trackers:
+PRIVATE_TRACKERS=TorrentLeech,IPTorrents,PassThePopcorn,BroadcasTheNet
+
+# Example with different private trackers:
+PRIVATE_TRACKERS=DarkPeers,DigitalCore,HomieHelpDesk,Rastastugan,SeedPool
 ```
+
+**⚠️ Use exact names from NZBHydra2 - Case sensitive! Comma-separated, no spaces!**
+
+**What happens with this configuration:**
+
+✅ **With PRIVATE_TRACKERS set:**
+- Seedable labels all results: `[PRI:2 PUB:1] Movie.Title.1080p`
+- Filters to show torrents that exist on 2+ trackers where at least 1 is private
+- You can download from public trackers knowing you can cross-seed to private trackers
+- Maximizes your upload ratio on private trackers
+
+❌ **Without PRIVATE_TRACKERS set (or set incorrectly):**
+- Seedable cannot distinguish private from public trackers
+- Filtering becomes too aggressive
+- Most/all results get filtered out
+- **You will get few or no search results!**
 
 **Result Labels:**
 
-When configured, torrents will show labels **at the front** for easy sorting and visibility:
-- `[PRI:2 PUB:1] The.Matrix.1999.1080p.AMZN.WEB-DL` - 2 private trackers, 1 public tracker
+When properly configured, torrents show labels at the front for easy sorting:
+- `[PRI:2 PUB:1] The.Matrix.1999.1080p.AMZN.WEB-DL` - 2 private trackers, 1 public tracker ← **Best for ratio!**
 - `[PRI:3 PUB:0] Interstellar.2014.2160p.BluRay` - Private-only (3 private trackers)
 - `[PRI:1 PUB:2] Avatar.2009.1080p.BluRay` - 1 private tracker, 2 public trackers
 
-The labels appear at the beginning so you can quickly identify and sort by tracker distribution!
+**Can I use only public trackers?**
 
-**Filtering Behavior:**
+Yes! If you **only** have public trackers (no private), you can leave `PRIVATE_TRACKERS` empty:
 
-Without `PRIVATE_TRACKERS` set:
-- ✅ Shows all torrents on 2+ trackers (public or private)
+```bash
+PRIVATE_TRACKERS=
+```
 
-With `PRIVATE_TRACKERS` set:
-- ✅ Shows torrents on 2+ trackers where at least 1 is private
-- ❌ Filters out torrents that exist only on public trackers
+In this case:
+- All results show as `[PUB:X]` with no PRI label
+- Seedable filters to show torrents on 2+ public trackers
+- Works perfectly for public-only setups
 
-This ensures you can download from public trackers knowing you'll be able to cross-seed to private trackers!
+**Summary:**
+- **Private trackers only:** Set `PRIVATE_TRACKERS` to your private tracker names
+- **Public + Private (recommended):** Set `PRIVATE_TRACKERS` to your private tracker names
+- **Public trackers only:** Leave `PRIVATE_TRACKERS` empty
+
+**This setting is the difference between Seedable working perfectly and not working at all!**
 
 ### Adjusting Filtering
 
@@ -297,21 +405,55 @@ Sonarr/Radarr receives only groups that meet BOTH requirements:
 
 ### "Query successful, but no results in the configured categories"
 
-**This is the #1 most common issue!** You forgot to select the main category.
+**This is the #1 most common issue!** You didn't select ALL categories (main + subcategories).
 
 **Solution:**
 1. Go to Sonarr/Radarr → **Settings** → **Indexers**
 2. Edit the Seedable indexer
-3. Check the **main category**:
-   - **Sonarr:** Check **5000 (TV)**
-   - **Radarr:** Check **2000 (Movies)**
+3. **Select ALL categories** - not just the main one, not just subcategories, but **ALL of them**:
+   - **Sonarr:** Check **5000 (TV)** AND **5020, 5030, 5040, 5045, 5050, 5060, 5070, 5080**
+   - **Radarr:** Check **2000 (Movies)** AND **2010, 2020, 2030, 2040, 2045, 2050, 2060**
 4. Save and test again
 
-**Why?** NZBHydra2 assigns most torrents to the main category (5000 or 2000), not the subcategories (5030, 5040, etc.). If you only select subcategories, you'll get zero results even though Seedable is working correctly!
+**Why ALL categories?** Different indexers assign the same torrent to different categories:
+- Some indexers use the main category (5000 or 2000) for everything
+- Others use specific subcategories (5040 for TV HD, 2045 for Movies UHD)
+- The SAME torrent might be in category 5000 on one indexer and 5045 on another
+- If you don't select all categories, you'll miss results
+
+**Example:** "The Matrix 1080p" might be:
+- Category 2000 (Movies) on IndexerA
+- Category 2040 (Movies HD) on IndexerB
+- Category 2045 (Movies UHD) on IndexerC
+
+If you only select 2000, you'll miss the results from IndexerB and IndexerC!
 
 ### No results in Sonarr/Radarr
 
-**Check Seedable logs:**
+**Possible causes (in order of likelihood):**
+
+**1. Missing PRIVATE_TRACKERS configuration (MOST COMMON!)**
+
+If you have private trackers but didn't configure `PRIVATE_TRACKERS` in your `.env` file, Seedable will filter out most/all results!
+
+**Solution:**
+```bash
+nano /opt/seedable/.env
+```
+Add your private tracker names:
+```bash
+PRIVATE_TRACKERS=TorrentLeech,IPTorrents,YourPrivateTracker
+```
+Then restart:
+```bash
+docker-compose restart seedable
+```
+
+**2. Didn't select all categories**
+
+See the section above: "Query successful, but no results in the configured categories"
+
+**3. Check Seedable logs:**
 ```bash
 docker logs seedable
 ```
@@ -320,9 +462,15 @@ Look for lines like:
 ```
 Category filtered to 0 results matching ['5030', '5040', '5070']
 ```
-If you see this, you forgot the main category (5000 for TV or 2000 for Movies)!
+If you see this, you forgot categories (see solution above)!
 
-**Verify NZBHydra2 is accessible:**
+Look for lines like:
+```
+Filtered to 0 cross-seedable results (min 2 trackers)
+```
+If you see this, check your `PRIVATE_TRACKERS` setting!
+
+**4. Verify NZBHydra2 is accessible:**
 ```bash
 curl http://YOUR_SERVER_IP:5076/internalapi/search \
   -X POST \
@@ -330,10 +478,12 @@ curl http://YOUR_SERVER_IP:5076/internalapi/search \
   -d '{"query":"test","category":"All"}'
 ```
 
-**Lower MIN_DUPLICATES temporarily:**
-```yaml
-- MIN_DUPLICATES=1  # Shows all results (no filtering)
+**5. Lower MIN_DUPLICATES temporarily for testing:**
+Edit `.env`:
+```bash
+MIN_DUPLICATES=1  # Shows all results (no filtering)
 ```
+Then: `docker-compose restart seedable`
 
 ### Too few results
 
@@ -343,7 +493,7 @@ curl http://YOUR_SERVER_IP:5076/internalapi/search \
 
 ### API key errors
 
-Make sure the API key in Sonarr/Radarr matches the `API_KEY` in docker-compose.yml.
+Make sure the API key in Sonarr/Radarr matches the `API_KEY` in your `.env` file.
 
 ### Connection refused
 
