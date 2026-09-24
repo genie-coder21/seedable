@@ -88,6 +88,21 @@ def format_rfc822_date(date_str: str) -> str:
     return dt.strftime('%a, %d %b %Y %H:%M:%S +0000')
 
 
+def _norm_tracker(name: str) -> str:
+    """NZBHydra2 reports trackers as e.g. 'TorrentLeech (Prowlarr)'; match on the bare name."""
+    n = (name or '').lower()
+    for suffix in (' (prowlarr)', ' (api)'):
+        n = n.replace(suffix, '')
+    return n.strip()
+
+
+_PRIVATE_NORM = {_norm_tracker(t) for t in PRIVATE_TRACKERS}
+
+
+def _is_private(indexer: str) -> bool:
+    return _norm_tracker(indexer) in _PRIVATE_NORM
+
+
 def get_size_bucket(size_bytes: int, tolerance_percent: float = SIZE_TOLERANCE_PERCENT) -> int:
     size_mb = size_bytes / (1024 * 1024)
 
@@ -130,7 +145,7 @@ def filter_cross_seedable(groups: Dict[Tuple, List[Dict[str, Any]]]) -> List[Dic
 
         for result in group_results:
             indexer = result.get('indexer', '')
-            if indexer in PRIVATE_TRACKERS:
+            if _is_private(indexer):
                 private_count += 1
             else:
                 public_count += 1
@@ -209,6 +224,49 @@ def lookup_title_from_sonarr(tvdb_id: str) -> str:
         return ''
 
 
+def parse_torznab_feed(xml_text: str) -> List[Dict[str, Any]]:
+    """Turn NZBHydra2's Torznab XML into the dicts the rest of this app expects."""
+    import xml.etree.ElementTree as ET
+    TZ = '{http://torznab.com/schemas/2015/feed}'
+    out: List[Dict[str, Any]] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.error(f"Could not parse Torznab XML from NZBHydra2: {e}")
+        return out
+    for item in root.iter('item'):
+        attrs = {a.get('name'): a.get('value') for a in item.findall(f'{TZ}attr')}
+        def txt(tag, default=''):
+            el = item.find(tag)
+            return el.text if el is not None and el.text else default
+        try:
+            size = int(attrs.get('size') or txt('size', '0') or 0)
+        except ValueError:
+            size = 0
+        # Hydra's <category> elements hold NAMES ('TV HD', 'Anime', 'Movies'); the numeric
+        # torznab attrs are per-tracker ids, not newznab ones - so use the names.
+        cats = [c.text for c in item.findall('category') if c.text and c.text != 'All']
+        cat_name = cats[0] if cats else 'Movies'
+        out.append({
+            'title': txt('title'),
+            'size': size,
+            'indexer': attrs.get('hydraIndexerName', 'Unknown'),
+            'link': txt('link'),
+            'searchResultId': txt('guid') or txt('link'),
+            'details_link': txt('comments'),
+            'pubDate': txt('pubDate'),
+            'seeders': int(attrs.get('seeders') or 0),
+            'peers': int(attrs.get('peers') or attrs.get('leechers') or 0),
+            'grabs': int(attrs.get('grabs') or 0),
+            'category': cat_name,
+            'imdbId': ('tt' + attrs['imdbid']) if attrs.get('imdbid') else None,
+            'tvdbId': attrs.get('tvdbid'),
+            'downloadVolumeFactor': 'Freelech' if attrs.get('downloadvolumefactor') == '0' else '',
+        })
+    logger.info(f"Parsed {len(out)} results from the Torznab feed")
+    return out
+
+
 def query_nzbhydra(params: Dict[str, str]) -> Dict[str, Any]:
     category_map = {
         '2000': 'Movies',
@@ -255,16 +313,37 @@ def query_nzbhydra(params: Dict[str, str]) -> Dict[str, Any]:
 
     logger.info(f"Querying NZBHydra2: {hydra_params}")
 
+    # NZBHydra2 9.x: /internalapi/search needs POST + an XSRF token and answers 403/405
+    # without one. Use the public Torznab feed instead - it carries hydraIndexerName,
+    # which is what the cross-seed grouping needs anyway.  (patched 2026-09-24)
     try:
-        url = f"{NZBHYDRA_URL}/internalapi/search"
+        url = f"{NZBHYDRA_URL}/torznab/api"
 
-        params = {}
+        t = 'search'
+        if params.get('season') or params.get('ep') or params.get('tvdbid'):
+            t = 'tvsearch'
+        elif params.get('imdbid'):
+            t = 'movie'
+
+        # ask Hydra for more than its default 100 - cross-seed matching needs a wide net
+        tz = {'t': t, 'q': query, 'extended': '1',
+              'limit': params.get('hydralimit', os.getenv('HYDRA_LIMIT', '500'))}
+        if params.get('offset'):
+            tz['offset'] = params.get('offset')
         if NZBHYDRA_API_KEY:
-            params['apikey'] = NZBHYDRA_API_KEY
+            tz['apikey'] = NZBHYDRA_API_KEY
+        for src, dst in (('season', 'season'), ('ep', 'ep'), ('cat', 'cat')):
+            if params.get(src):
+                tz[dst] = params.get(src)
+        if params.get('imdbid'):
+            tz['imdbid'] = params.get('imdbid').replace('tt', '')
+        if params.get('tvdbid'):
+            tz['tvdbid'] = params.get('tvdbid')
 
-        response = requests.post(url, json=hydra_params, params=params, timeout=60)
+        response = requests.get(url, params=tz, timeout=120)
         response.raise_for_status()
-        return response.json()
+        return {'searchResults': parse_torznab_feed(response.text),
+                'numberOfAvailableResults': 0}
     except requests.exceptions.RequestException as e:
         logger.error(f"Error querying NZBHydra2: {e}")
         return {'searchResults': [], 'numberOfAvailableResults': 0}
@@ -434,11 +513,15 @@ def torznab_api():
             if requested_imdbid:
                 if not requested_imdbid.startswith('tt'):
                     requested_imdbid = f'tt{requested_imdbid}'
-                all_results = [r for r in all_results if r.get('imdbId') == requested_imdbid]
+                # keep results that match, AND results that simply don't state an ID -
+                # most private-tracker feeds omit imdbid, and dropping them leaves nothing
+                all_results = [r for r in all_results
+                               if r.get('imdbId') in (None, '', requested_imdbid)]
                 logger.info(f"Filtered to {len(all_results)} results matching IMDb ID {requested_imdbid}")
 
             if requested_tvdbid and not requested_imdbid:
-                all_results = [r for r in all_results if str(r.get('tvdbId')) == requested_tvdbid]
+                all_results = [r for r in all_results
+                               if r.get('tvdbId') in (None, '') or str(r.get('tvdbId')) == requested_tvdbid]
                 logger.info(f"Filtered to {len(all_results)} results matching TVDb ID {requested_tvdbid}")
 
             groups = group_results(all_results)
