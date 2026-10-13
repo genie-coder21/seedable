@@ -241,8 +241,31 @@ Visit `http://YOUR_SERVER_IP:5000` to see the status page.
 | `MIN_DUPLICATES` | `2` | Minimum trackers a torrent must be on |
 | `SIZE_TOLERANCE_PERCENT` | `2.0` | Allowed size variance for grouping (±%) |
 | `PRIVATE_TRACKERS` | _(empty)_ | Comma-separated list of private tracker names (optional) |
+| `MIN_CROSSSEEDS` | `4` | autobrr gate: private trackers a release must already be on before your own library downloads it |
+| `PERSONAL_MARKER` | `/Personal/` | autobrr gate: root folders containing this string skip the tracker minimum |
 | `PORT` | `5000` | Port to run the service on |
 | `HOST` | `0.0.0.0` | Host to bind to |
+
+### autobrr gate: `/autobrr/check`
+
+If you grab releases from IRC announces with [autobrr](https://autobrr.com), Seedable can act as an
+**external filter** so that only releases worth downloading get pushed to Sonarr/Radarr.
+
+`POST /autobrr/check?apikey=<API_KEY>` with a JSON body like
+`{"name": "{{ .TorrentName }}", "indexer": "{{ .IndexerName }}", "category": "{{ .Category }}", "size": {{ .Size }}}`
+answers **200** (download) or **412** (skip):
+
+1. The release is parsed by Sonarr (then Radarr). Unknown, or the series/movie is **not monitored** → 412.
+2. The item's root folder contains `PERSONAL_MARKER` (someone else's library) → 200 immediately.
+3. Otherwise the identical release must already be listed on at least `MIN_CROSSSEEDS` private
+   trackers in NZBHydra2 (searched by TVDb/IMDb ID, falling back to a title search) → 200, else 412.
+
+The response body is JSON (`decision`, `reason`, and for library releases the `trackers` found), and every
+decision is logged as `[autobrr] ACCEPT ...` / `[autobrr] REJECT ...`.
+
+In autobrr: **Filters → your filter → External → Add → Webhook**, host `http://<seedable>:5000/autobrr/check?apikey=<API_KEY>`,
+method `POST`, data as above, expected status `200`, on error `Reject`. Put your Sonarr/Radarr actions on the same filter;
+they still make the final wanted/quality decision.
 
 ### Why Radarr/Sonarr API Keys?
 

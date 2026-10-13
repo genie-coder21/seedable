@@ -28,6 +28,12 @@ services:
       - MIN_DUPLICATES=2
       - SIZE_TOLERANCE_PERCENT=2.0
 
+      # autobrr gate (/autobrr/check) - see README
+      # Releases for your own library must already be on this many private trackers
+      - MIN_CROSSSEEDS=4
+      # Root folders containing this string are treated as other people's libraries (no tracker minimum)
+      - PERSONAL_MARKER=/Personal/
+
       # Private tracker prioritization (optional)
       # Comma-separated list of private tracker names as they appear in NZBHydra2
       # If set, public trackers will only show results that can cross-seed to private trackers

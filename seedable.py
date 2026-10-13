@@ -31,6 +31,12 @@ RADARR_API_KEY = os.getenv('RADARR_API_KEY', '')
 SONARR_URL = os.getenv('SONARR_URL', 'http://YOUR_SERVER_IP:8989')
 SONARR_API_KEY = os.getenv('SONARR_API_KEY', '')
 
+# autobrr gate (/autobrr/check): releases for the user's own library must already sit on
+# this many private trackers; anything under a root folder containing PERSONAL_MARKER
+# (other people's libraries) skips that check.
+MIN_CROSSSEEDS = int(os.getenv('MIN_CROSSSEEDS', '4'))
+PERSONAL_MARKER = os.getenv('PERSONAL_MARKER', '/Personal/')
+
 PRIVATE_TRACKERS_STR = os.getenv('PRIVATE_TRACKERS', '')
 PRIVATE_TRACKERS = set(t.strip() for t in PRIVATE_TRACKERS_STR.split(',') if t.strip())
 
@@ -623,6 +629,116 @@ def get_capabilities():
     xml_string = tostring(caps, encoding='unicode', method='xml')
     return Response(f'<?xml version="1.0" encoding="UTF-8"?>\n{xml_string}',
                     mimetype='application/xml')
+
+
+# ---------------------------------------------------------------------------
+# autobrr external-filter gate
+#
+# autobrr POSTs the announced release here before its Sonarr/Radarr action.
+# 200 = go ahead, 412 = don't.  Decision:
+#   1. Sonarr/Radarr must recognise the release (parse) and the series/movie
+#      must be monitored - otherwise reject.
+#   2. root folder contains PERSONAL_MARKER  -> accept at once (others' libraries).
+#   3. otherwise the identical release must already be on >= MIN_CROSSSEEDS
+#      private trackers according to NZBHydra2 (searched by tvdb/imdb id, with a
+#      plain name search as a fallback) -> accept, else reject.
+# The *arr push that follows still makes the final wanted/quality decision.
+# ---------------------------------------------------------------------------
+
+def _arr_parse(base_url: str, api_key: str, title: str) -> Dict[str, Any]:
+    if not base_url or not api_key:
+        return {}
+    try:
+        r = requests.get(f"{base_url}/api/v3/parse", params={'title': title},
+                         headers={'X-Api-Key': api_key}, timeout=15)
+        r.raise_for_status()
+        return r.json() or {}
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logger.error(f"parse failed against {base_url}: {e}")
+        return {}
+
+
+def _release_key(name: str) -> str:
+    """Same release, different tracker spelling: UNIT3D-based sites list
+    `The Queen's Gambit S01 ... DD+ 5.1 H.264-NTb` for what scene-style sites call
+    `The.Queens.Gambit.S01...DDP5.1.H.264-NTb`. Compare on a key with the punctuation gone
+    and the known audio/HDR rewrites unified."""
+    k = name.lower()
+    k = re.sub(r'dd\+', 'ddp', k)          # DD+ 5.1  ->  DDP5.1
+    k = k.replace('+', 'plus')             # HDR10+  <->  HDR10Plus
+    return re.sub(r'[^a-z0-9]+', '', k)
+
+
+def _trackers_carrying(name: str, hydra_params: Dict[str, str]) -> set:
+    """Private trackers on which NZBHydra2 lists this release (see _release_key)."""
+    want = _release_key(name)
+    found = set()
+    for res in query_nzbhydra(hydra_params).get('searchResults', []):
+        if _release_key(res.get('title', '')) == want and _is_private(res.get('indexer', '')):
+            found.add(_norm_tracker(res.get('indexer', '')))
+    return found
+
+
+def autobrr_check():
+    if request.args.get('apikey') != API_KEY:
+        return Response('Invalid API key', status=403)
+
+    body = request.get_json(silent=True) or {}
+    name = (body.get('name') or request.args.get('name') or '').strip()
+    if not name:
+        return _gate(412, 'no release name given')
+    logger.info(f"[autobrr] checking {name!r} (indexer={body.get('indexer')}, category={body.get('category')})")
+
+    # 1. who owns it?  Sonarr first (series parse), then Radarr.
+    kind, item, hydra = None, None, {}
+    parsed = _arr_parse(SONARR_URL, SONARR_API_KEY, name)
+    if parsed.get('series'):
+        kind, item = 'tv', parsed['series']
+        epi = parsed.get('parsedEpisodeInfo') or {}
+        hydra = {'tvdbid': str(item.get('tvdbId') or ''), 'cat': '5000'}
+        if epi.get('seasonNumber') is not None:
+            hydra['season'] = str(epi['seasonNumber'])
+        eps = epi.get('episodeNumbers') or []
+        if len(eps) == 1 and not epi.get('fullSeason'):
+            hydra['ep'] = str(eps[0])
+    else:
+        parsed = _arr_parse(RADARR_URL, RADARR_API_KEY, name)
+        if parsed.get('movie'):
+            kind, item = 'movie', parsed['movie']
+            hydra = {'imdbid': item.get('imdbId') or '', 'cat': '2000'}
+    if not item:
+        return _gate(412, 'not in Sonarr or Radarr', name=name)
+    if not item.get('monitored'):
+        return _gate(412, f'{kind} not monitored', name=name, kind=kind, title=item.get('title'))
+
+    # 2. whose library?
+    root = item.get('rootFolderPath') or item.get('path') or ''
+    if PERSONAL_MARKER in root:
+        return _gate(200, 'personal library: no cross-seed requirement', name=name, kind=kind,
+                     title=item.get('title'), library='personal', root=root)
+
+    # 3. main library: must already be on MIN_CROSSSEEDS private trackers
+    trackers = set()
+    if hydra.get('tvdbid') or hydra.get('imdbid'):
+        trackers |= _trackers_carrying(name, hydra)
+    if len(trackers) < MIN_CROSSSEEDS:
+        trackers |= _trackers_carrying(name, {'q': name})
+    ok = len(trackers) >= MIN_CROSSSEEDS
+    return _gate(200 if ok else 412,
+                 f'on {len(trackers)} private tracker(s), need {MIN_CROSSSEEDS}',
+                 name=name, kind=kind, title=item.get('title'), library='main', root=root,
+                 trackers=sorted(trackers), count=len(trackers))
+
+
+def _gate(status: int, reason: str, **info) -> Response:
+    import json
+    info.update({'decision': 'accept' if status == 200 else 'reject', 'reason': reason})
+    logger.info(f"[autobrr] {info['decision'].upper()} {info.get('name', '')!r}: {reason}"
+                + (f" {info['trackers']}" if info.get('trackers') else ''))
+    return Response(json.dumps(info), status=status, mimetype='application/json')
+
+
+app.add_url_rule('/autobrr/check', 'autobrr_check', autobrr_check, methods=['GET', 'POST'])
 
 
 @app.route('/health')
